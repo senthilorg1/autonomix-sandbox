@@ -1,0 +1,13 @@
+# S4.1 sandbox only: a stand-in for the real trusted build (S4.3). It does nothing except finish successfully, so the recorder sees a completed
+# workflow_run for the pull request's head. The image and its provenance come from the fixture publisher (backend/approval-recorder/cmd/fixture-publisher).
+# The file name is what the recorder looks for (REC_BUILD_WORKFLOW_PATH default .github/workflows/trusted-candidate-build.yml).
+name: trusted-candidate-build
+on:
+  pull_request:
+    branches: [main]
+permissions: {}
+jobs:
+  stand-in:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in build for ${{ github.event.pull_request.head.sha }}"
