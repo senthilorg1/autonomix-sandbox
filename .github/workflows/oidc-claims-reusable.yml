@@ -1,0 +1,26 @@
+# Reusable half of the S4 spike 2 claims test. Copy to .github/workflows/oidc-claims-reusable.yml in senthilorg1/autonomix-sandbox.
+# Prints the CLAIMS of a GitHub Actions OIDC token (the middle part), never the token. The token is masked and never written to the log or a file.
+name: oidc-claims-reusable
+on:
+  workflow_call:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  claims:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print the claims (called as a reusable workflow)
+        env:
+          AUD: https://senthilorg1.example/openbao
+        run: |
+          set -eu
+          T="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD" | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')"
+          echo "::add-mask::$T"
+          printf '%s' "$T" | python3 -c '
+          import sys,json,base64
+          p=sys.stdin.read().split(".")[1]; p+="="*(-len(p)%4)
+          c=json.loads(base64.urlsafe_b64decode(p))
+          keep=["iss","aud","sub","repository","repository_id","repository_owner","repository_visibility","ref","ref_type","ref_protected","sha","event_name","workflow","workflow_ref","workflow_sha","job_workflow_ref","job_workflow_sha","environment","runner_environment","actor","head_ref","base_ref"]
+          print(json.dumps({k:c.get(k) for k in keep if k in c},indent=2,sort_keys=True))
+          print("claim names present:", sorted(c.keys()))'
