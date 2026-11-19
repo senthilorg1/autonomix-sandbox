@@ -1,0 +1,52 @@
+# S4.2.4 smoke test for the sandbox repository (senthilorg1/autonomix-sandbox): copy to .github/workflows/arc-smoke.yml on a branch and open a pull request.
+# Runs on the ARC scale set arc-untrusted (the ci-gates image). It uses no action at all (so there is nothing to pin) and no checkout: it only inspects its own pod.
+# It proves acceptance A-7 live: the runner reaches the allowed hosts and none of OpenBao, Harbor, the Kubernetes API, other namespaces, the LAN, or arbitrary internet hosts;
+# it has no ServiceAccount token, no OIDC token, no sudo, and runs as uid 1001. Any failed probe fails the job.
+name: arc-smoke
+on:
+  pull_request:
+    paths: [".github/workflows/arc-smoke.yml"]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: arc-untrusted
+    timeout-minutes: 10
+    steps:
+      - name: identity and tokens
+        run: |
+          set -u; fail=0
+          chk() { if eval "$2"; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi; }
+          chk "runs as uid 1001"                     '[ "$(id -u)" = 1001 ]'
+          chk "no sudo binary usable"                '! sudo -n true 2>/dev/null'
+          chk "no ServiceAccount token mounted"      '[ ! -e /var/run/secrets/kubernetes.io/serviceaccount/token ]'
+          chk "no OIDC request URL in the job"       '[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]'
+          chk "no OIDC request token in the job"     '[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]'
+          chk "ci-gates marker present"              'grep -q "ci-gates image" /opt/gates/IMAGE'
+          for t in go semgrep checkov hadolint squawk govulncheck go-licenses osv-scanner betterleaks closure-hash-tool gate-tool; do chk "tool $t on PATH" "command -v $t >/dev/null"; done
+          exit $fail
+      - name: allowed network (A-7)
+        run: |
+          fail=0
+          for u in https://api.github.com/ https://github.com/ https://proxy.golang.org/ https://sum.golang.org/latest https://vuln.go.dev/index/db.json.gz https://api.osv.dev/v1/query; do
+            code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X HEAD "$u" 2>/dev/null || curl -sS -m 15 -o /dev/null -w '%{http_code}' "$u" 2>/dev/null || echo 000)"
+            case "$code" in 000) echo "FAIL  $u unreachable"; fail=1;; *) echo "PASS  $u answered $code";; esac
+          done
+          exit $fail
+      - name: forbidden network (A-7)
+        run: |
+          fail=0
+          deny() { # $1 label, $2 url
+            if curl -sS -m 6 -o /dev/null "$2" >/dev/null 2>&1; then echo "FAIL  $1 is reachable ($2)"; fail=1; else echo "PASS  $1 is blocked"; fi; }
+          deny "OpenBao on the platform node"          https://192.168.86.38:8200/v1/sys/health
+          deny "Harbor push endpoint"                  https://192.168.86.38:8444/v2/
+          deny "Kubernetes API by service address"     https://10.43.0.1:443/
+          deny "Kubernetes API by name"                https://kubernetes.default.svc:443/
+          deny "Harbor service in another namespace"   http://harbor-core.harbor.svc:80/
+          deny "approval recorder in another namespace" http://approval-recorder.hitl.svc:8080/
+          deny "OpenBao service in another namespace"  https://openbao.openbao.svc:8200/
+          deny "arc controller namespace"              http://arc-controller-gha-rs-controller.arc-systems.svc:8080/
+          deny "LAN gateway"                           http://192.168.86.1/
+          deny "arbitrary internet host (example.com)" https://example.com/
+          deny "GitHub over plain http"                http://github.com/
+          exit $fail
