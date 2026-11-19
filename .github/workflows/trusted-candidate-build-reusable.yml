@@ -97,6 +97,7 @@ jobs:
           GOTOOLCHAIN: local
         run: |
           set -euo pipefail
+          mkdir -p "$GOMODCACHE"   # a service with no dependencies leaves no cache, and BuildKit needs the directory as a build context
           go mod download
       - name: build offline with rootless BuildKit (RUN steps have no network)
         run: |
