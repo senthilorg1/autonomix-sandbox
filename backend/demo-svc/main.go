@@ -1,4 +1,3 @@
-// throw away comment
 package main
 
 import "fmt"
