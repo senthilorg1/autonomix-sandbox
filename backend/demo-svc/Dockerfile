@@ -5,6 +5,8 @@ FROM 192.168.86.38:8444/mirror/golang@sha256:4165ee6bf3b7811fd7b40373290405c83d0
 ARG PKG=.
 WORKDIR /src
 COPY . .
+# A-2 part 2 test: a build that takes about 150 seconds longer, so a reviewer can approve while `build` or `sign` is still running.
+RUN --network=none sleep 150
 RUN --network=none --mount=type=bind,from=modcache,source=/,target=/modcache,readonly \
     GOMODCACHE=/modcache GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags='-s -w -buildid=' -o /out/app ${PKG}
