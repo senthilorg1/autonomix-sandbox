@@ -33,7 +33,33 @@ gate undeclared-modules undeclared
 # Stage 1
 gate secrets betterleaks git --config "$GATES_DIR/gitleaks.toml" --no-banner --log-opts="$MB..$HEAD" .
 RULES=(--config "$GATES_DIR/semgrep/rules"); for v in "$GATES_DIR"/semgrep/vendor/*/; do RULES+=(--config "$v"); done
-gate semgrep semgrep scan --metrics=off --disable-version-check --quiet --error --baseline-commit "$MB" "${RULES[@]}" --sarif --output "$REPORTS/semgrep.sarif" .
+# Semgrep runs without --error (a tool failure is still a non-zero exit) and the findings are judged here, because exactly one form of an unpinned `uses:` is allowed:
+# this repository's own trusted reusable workflow at the short ref `main` (contract 16 section 8, spike 1: `refs/heads/main` is refused at parse time, a SHA is impossible
+# for a workflow that must always be the one on main). Any other unpinned reference, including the same file name in another repository, still fails.
+semgrep_scan() {
+  semgrep scan --metrics=off --disable-version-check --quiet --baseline-commit "$MB" "${RULES[@]}" --sarif --output "$REPORTS/semgrep.sarif" . || return 1
+  $PY - "$REPORTS/semgrep.sarif" "${GITHUB_REPOSITORY:-}" <<'PYEOF'
+import json,re,sys
+sarif,repo=sys.argv[1],sys.argv[2]
+allowed=re.compile(r'^\s*-?\s*uses:\s*["\']?'+re.escape(repo)+r'/\.github/workflows/trusted-candidate-build-reusable\.yml@main["\']?\s*(#.*)?$') if repo else None
+left=0
+for run in json.load(open(sarif)).get("runs",[]):
+    for r in run.get("results",[]):
+        loc=r["locations"][0]["physicalLocation"]
+        if r["ruleId"].endswith("autonomix.action-not-pinned-to-sha") and allowed:
+            try:
+                line=open(loc["artifactLocation"]["uri"]).read().split("\n")[loc["region"]["startLine"]-1]
+            except (OSError,IndexError,KeyError):
+                line=""
+            if allowed.match(line):
+                print("exempt: %s:%s (the trusted reusable workflow of this repository at main)"%(loc["artifactLocation"]["uri"],loc["region"]["startLine"]))
+                continue
+        left+=1
+        print("%s:%s %s: %s"%(loc["artifactLocation"]["uri"],loc["region"].get("startLine"),r["ruleId"],r["message"]["text"]))
+sys.exit(1 if left else 0)
+PYEOF
+}
+gate semgrep semgrep_scan
 while read -r n root; do
   gate "closure-$n" closure-hash-tool check --service "$n" --commit "$HEAD" --main-ref "$MAIN_REF" && { h="$(closure-hash-tool hash --service "$n" --commit "$HEAD" --main-ref "$MAIN_REF")"; echo "      closure hash of $n: $h"; echo "closure $n $h" >> "$REPORTS/closure-hashes.txt"; }
   gate "govulncheck-$n" bash -c "cd '$root' && govulncheck ./..."
