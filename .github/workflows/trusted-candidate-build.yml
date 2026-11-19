@@ -1,7 +1,4 @@
-# Caller stub of the Stage 3 candidate build (contract 16 section 4, requirement W-1). The file name is what the approval recorder watches.
-# It only calls the reusable workflow on main by absolute reference: the called jobs run the version on main, never the pull request's copy (spike 1).
-# A pull request may edit this stub (it is CODEOWNERS-protected, so the change cannot merge), but an edited or missing stub yields no signed candidate.
-# The head SHA is NOT an input: the reusable workflow reads it from the event. The service name is the only input.
+# Forgery case A-8(a): a pull request whose caller stub does not call the reusable workflow. Expected: no candidate, no provenance, the recorder records no approval.
 name: trusted-candidate-build
 on:
   pull_request:
@@ -9,10 +6,6 @@ on:
 permissions: {}
 jobs:
   candidate:
-    # the caller grants the ceiling; the reusable workflow narrows it per job (the build job gets no id-token)
-    permissions:
-      contents: read
-      id-token: write
-    uses: senthilorg1/autonomix-sandbox/.github/workflows/trusted-candidate-build-reusable.yml@main
-    with:
-      service: demo-svc
+    runs-on: arc-untrusted
+    steps:
+      - run: echo "a stub that builds nothing and signs nothing"
