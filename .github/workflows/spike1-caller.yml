@@ -8,7 +8,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: senthilorg1/autonomix-sandbox/.github/workflows/spike1-reusable.yml@refs/heads/spike-trusted
+    uses: senthilorg1/autonomix-sandbox/.github/workflows/spike1-reusable.yml@spike-trusted
   relative:
     permissions:
       contents: read
