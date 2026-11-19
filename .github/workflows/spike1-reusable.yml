@@ -1,0 +1,27 @@
+# S4.3.0 spike 1 (reusable workflow called by absolute ref from a pull request). Prints a marker and the CLAIMS of an OIDC token (never the token).
+# Sandbox only: a throwaway public repository, logs are public, nothing secret is printed.
+name: spike1-reusable
+on:
+  workflow_call:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  claims:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print the marker and the claims
+        env:
+          MARKER: TRUSTED-VERSION
+          AUD: https://senthilorg1.example/spike
+        run: |
+          set -eu
+          echo "MARKER=$MARKER"
+          T="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD" | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')"
+          echo "::add-mask::$T"
+          printf '%s' "$T" | python3 -c '
+          import sys,json,base64
+          p=sys.stdin.read().split(".")[1]; p+="="*(-len(p)%4)
+          c=json.loads(base64.urlsafe_b64decode(p))
+          keep=["sub","repository","repository_id","ref","sha","event_name","workflow_ref","job_workflow_ref","job_workflow_sha","ref_protected","head_ref","base_ref"]
+          print(json.dumps({k:c.get(k) for k in keep if k in c},indent=2,sort_keys=True))'
