@@ -1,13 +1,18 @@
-# S4.1 sandbox only: a stand-in for the real trusted build (S4.3). It does nothing except finish successfully, so the recorder sees a completed
-# workflow_run for the pull request's head. The image and its provenance come from the fixture publisher (backend/approval-recorder/cmd/fixture-publisher).
-# The file name is what the recorder looks for (REC_BUILD_WORKFLOW_PATH default .github/workflows/trusted-candidate-build.yml).
+# Caller stub of the Stage 3 candidate build (contract 16 section 4, requirement W-1). The file name is what the approval recorder watches.
+# It only calls the reusable workflow on main by absolute reference: the called jobs run the version on main, never the pull request's copy (spike 1).
+# A pull request may edit this stub (it is CODEOWNERS-protected, so the change cannot merge), but an edited or missing stub yields no signed candidate.
+# The head SHA is NOT an input: the reusable workflow reads it from the event. The service name is the only input.
 name: trusted-candidate-build
 on:
   pull_request:
     branches: [main]
 permissions: {}
 jobs:
-  stand-in:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "stand-in build for ${{ github.event.pull_request.head.sha }}"
+  candidate:
+    # the caller grants the ceiling; the reusable workflow narrows it per job (the build job gets no id-token)
+    permissions:
+      contents: read
+      id-token: write
+    uses: senthilorg1/autonomix-sandbox/.github/workflows/trusted-candidate-build-reusable.yml@main
+    with:
+      service: demo-svc
