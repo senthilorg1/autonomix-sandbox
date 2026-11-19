@@ -163,6 +163,7 @@ jobs:
       CS_REPOSITORY_ID: "1462196310"
       CS_OWNER_ID: "358000095"
       CS_TRUSTED_WORKFLOW: senthilorg1/autonomix-sandbox/.github/workflows/trusted-candidate-build-reusable.yml@refs/heads/main
+      CS_HARBOR_HOST: 192.168.86.38:8444
       CS_HARBOR_URL: https://192.168.86.38:8444
       CS_COSIGN_KEY: hashivault://cosign-pr
       CS_COSIGN_BINARY: /usr/local/bin/cosign
