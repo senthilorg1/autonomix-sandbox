@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 1 and 2 gate driver (S4.2.5). Runs inside the ci-gates image on the arc-untrusted scale set, in a checkout of the pull request (fetch-depth 0). 
+# Stage 1 and 2 gate driver (S4.2.5). Runs inside the ci-gates image on the arc-untrusted scale set, in a checkout of the pull request (fetch-depth 0).
 # The workflow runs the copy of this script that is on the main ref, never the pull request's own copy. Gate configuration comes from the image (GATES_DIR),
 # the coverage baseline from the main ref. A gate whose tool cannot start FAILS; a gate with no input in the tree PASSES and says so.
 # Env: BASE, HEAD (full commit ids of the pull request's base and head), MAIN_REF (default refs/heads/main), GATES_DIR (default /opt/gates), REPORTS (default $RUNNER_TEMP/reports).
