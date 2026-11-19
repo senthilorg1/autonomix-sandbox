@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "method": "go test -count=1 -coverpkg=./... -coverprofile per module; percent by gate-tool coverage-ratchet",
+  "services": {
+    "demo-svc": {"baseline": 50.0, "target": 80}
+  }
+}
