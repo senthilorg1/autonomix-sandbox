@@ -1,0 +1,4 @@
+# Human platform administrator approval is required for the gates themselves (spec section 3.1 item 1, requirement W-2).
+/.github/            @senthilatchennai
+/closure-manifest.yaml @senthilatchennai
+/gates/              @senthilatchennai

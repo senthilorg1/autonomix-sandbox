@@ -1,0 +1,36 @@
+# Stage 1 and 2 gates for pull requests (S4.2.5). Runs on the ARC scale set arc-untrusted (ci-gates image): contents read only, no OIDC token, no secret.
+# The driver script is read from the main ref, not from the pull request, so a pull request cannot weaken the gates that judge it; this workflow file and gates/**
+# are CODEOWNERS-protected (decision D-42-9: the Free plan has no "required workflows", so the required status check "gates" plus CODEOWNERS stand in).
+name: pr-gates
+on:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: pr-gates-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  gates:
+    name: gates
+    runs-on: arc-untrusted
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: run the gates (driver from main)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git show refs/remotes/origin/main:gates/run-gates.sh > "$RUNNER_TEMP/run-gates.sh"
+          bash "$RUNNER_TEMP/run-gates.sh"
+      - name: reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-reports
+          path: ${{ runner.temp }}/reports
+          if-no-files-found: ignore

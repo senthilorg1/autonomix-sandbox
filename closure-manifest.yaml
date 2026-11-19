@@ -1,0 +1,7 @@
+# Closure manifest (contract 04) for the sandbox. Read only from refs/heads/main by closure-hash-tool.
+version: 1
+services:
+  demo-svc:
+    language: go
+    root: backend/demo-svc
+    paths: []
