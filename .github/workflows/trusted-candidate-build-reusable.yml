@@ -1,0 +1,215 @@
+# Stage 3 candidate build and signing (contract 16, requirement W-2). Runs from main only (called by absolute reference from the caller stub).
+# Three jobs on two scale sets: mint (arc-signer), build (arc-builder, runs untrusted Dockerfile RUN steps, no OIDC token, no OpenBao), sign (arc-signer).
+# Nothing secret is ever printed: tokens and the robot secret are masked, passed on stdin or via files in RUNNER_TEMP, and never put in argv or outputs
+# (the one output that matters, the redeem code, is a single-use 5-minute code, not a credential).
+name: trusted-candidate-build-reusable
+on:
+  workflow_call:
+    inputs:
+      service:
+        type: string
+        required: true
+permissions: {}
+env:
+  HARBOR_HOST: 192.168.86.38:8444
+  BROKER_OIDC: https://candidate-broker-oidc.ci-broker.svc:8443
+  BROKER_REDEEM: https://candidate-broker-redeem.ci-broker.svc:8444
+  POD_CA: /etc/ci/ca/ca.crt
+jobs:
+  mint:
+    name: mint
+    runs-on: arc-signer
+    timeout-minutes: 10
+    permissions:
+      id-token: write       # no repository code is checked out here
+    outputs:
+      redeem_code: ${{ steps.mint.outputs.redeem_code }}
+      started_at: ${{ steps.mint.outputs.started_at }}
+      ca_b64: ${{ steps.mint.outputs.ca_b64 }}
+    steps:
+      - id: mint
+        name: refuse unsafe input, ask the broker for a redeem code
+        env:
+          SERVICE: ${{ inputs.service }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          REPO_ID: ${{ github.repository_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$SERVICE" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || { echo "::error::the service input is not a valid service name"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no valid pull request head SHA in the event"; exit 1; }
+          [[ -n "$HEAD_REPO_ID" && "$HEAD_REPO_ID" == "$REPO_ID" ]] || { echo "::error::pull requests from forks are refused"; exit 1; }
+          STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          TOK="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autonomix-ci-broker" | jq -r .value)"
+          [[ "$TOK" == *.*.* ]] || { echo "::error::no OIDC token"; exit 1; }
+          echo "::add-mask::$TOK"
+          R="$(printf 'header = "Authorization: Bearer %s"\n' "$TOK" | curl -fsS -m 30 -K - --cacert "$POD_CA" -X POST -H 'Content-Type: application/json' \
+                 -d "$(jq -cn --arg r "$RUN_ID" --arg a "$RUN_ATTEMPT" '{run_id:$r,run_attempt:$a}')" "$BROKER_OIDC/v1/builds")" || { echo "::error::the broker refused the build"; exit 1; }
+          CODE="$(jq -r '.redeem_code // empty' <<<"$R")"
+          [[ -n "$CODE" ]] || { echo "::error::the broker returned no redeem code"; exit 1; }
+          { echo "redeem_code=$CODE"; echo "started_at=$STARTED"; echo "ca_b64=$(base64 -w0 "$POD_CA")"; } >> "$GITHUB_OUTPUT"
+          { echo "### mint"; echo "- head SHA: \`$HEAD_SHA\`"; echo "- run: $RUN_ID attempt $RUN_ATTEMPT, started $STARTED"; } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build
+    needs: mint
+    runs-on: arc-builder
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: none
+    env:
+      SERVICE: ${{ inputs.service }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: src
+          persist-credentials: false
+      - name: trust the private CA, redeem the run's robot, log in to Harbor
+        env:
+          CODE: ${{ needs.mint.outputs.redeem_code }}
+          CA_B64: ${{ needs.mint.outputs.ca_b64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/ca" "$RUNNER_TEMP/dc"
+          printf '%s' "$CA_B64" | base64 -d > "$RUNNER_TEMP/ca/ca.crt"
+          grep -q 'BEGIN CERTIFICATE' "$RUNNER_TEMP/ca/ca.crt" || { echo "::error::no CA certificate was passed on"; exit 1; }
+          R="$(curl -fsS -m 30 --cacert "$RUNNER_TEMP/ca/ca.crt" -X POST -H 'Content-Type: application/json' -d "$(jq -cn --arg c "$CODE" '{code:$c}')" "$BROKER_REDEEM/v1/redeem")" \
+            || { echo "::error::the broker refused the redeem code"; exit 1; }
+          NAME="$(jq -r .name <<<"$R")"; SECRET="$(jq -r .secret <<<"$R")"
+          [[ -n "$NAME" && -n "$SECRET" && "$NAME" != null && "$SECRET" != null ]] || { echo "::error::the broker returned no robot"; exit 1; }
+          echo "::add-mask::$SECRET"
+          [[ "$NAME" == 'robot$candidates+run-'"${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]] || { echo "::error::the robot is not this run's robot"; exit 1; }
+          export DOCKER_CONFIG="$RUNNER_TEMP/dc" SSL_CERT_DIR="$RUNNER_TEMP/ca"
+          printf '%s' "$SECRET" | crane auth login "$HARBOR_HOST" -u "$NAME" --password-stdin >/dev/null
+          { echo "DOCKER_CONFIG=$RUNNER_TEMP/dc"; echo "SSL_CERT_DIR=$RUNNER_TEMP/ca"; echo "ROBOT_NAME=$NAME"; } >> "$GITHUB_ENV"
+          printf '[registry."%s"]\n  ca = ["%s"]\n' "$HARBOR_HOST" "$RUNNER_TEMP/ca/ca.crt" > "$RUNNER_TEMP/buildkitd.toml"
+      - name: pre-fetch the Go modules (the only step that reaches a module proxy)
+        working-directory: src/backend/${{ inputs.service }}
+        env:
+          GOMODCACHE: ${{ runner.temp }}/modcache
+          GOFLAGS: -modcacherw
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          go mod download
+      - name: build offline with rootless BuildKit (RUN steps have no network)
+        run: |
+          set -euo pipefail
+          mkdir -p "$XDG_RUNTIME_DIR" "$RUNNER_TEMP/out"
+          [[ -f "src/backend/$SERVICE/Dockerfile" ]] || { echo "::error::backend/$SERVICE/Dockerfile does not exist"; exit 1; }
+          export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox --config=$RUNNER_TEMP/buildkitd.toml"
+          buildctl-daemonless.sh build --frontend dockerfile.v0 \
+            --local context="src/backend/$SERVICE" --local dockerfile="src/backend/$SERVICE" \
+            --local modcache="$RUNNER_TEMP/modcache" --opt context:modcache=local:modcache --opt build-arg:PKG=. \
+            --output "type=docker,name=candidate:build,dest=$RUNNER_TEMP/out/image.tar" --progress=plain
+      - name: SBOM, push the image and the SBOM
+        id: push
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"; NAME="candidates/$REPO"; REF="$HARBOR_HOST/$NAME:pr-$HEAD_SHA"
+          syft "docker-archive:$RUNNER_TEMP/out/image.tar" -o "cyclonedx-json=$RUNNER_TEMP/out/sbom.json" -q
+          grep -q '"bomFormat": *"CycloneDX"' "$RUNNER_TEMP/out/sbom.json" || { echo "::error::syft wrote no CycloneDX document"; exit 1; }
+          crane push "$RUNNER_TEMP/out/image.tar" "$REF" || { echo "::error::the push was refused (an existing pr-<sha> tag is immutable)"; exit 1; }
+          DIGEST="$(crane digest "$REF")"
+          # SBOM at the cosign tag sha256-<hex>.sbom: one manifest, one layer holding the raw CycloneDX document (what the signer's rule R-8 reads).
+          # Plain Registry v2 calls with the run's robot (the token flow of Harbor); the credential comes from the docker config, never argv.
+          AUTH="$(jq -r --arg h "$HARBOR_HOST" '.auths[$h].auth' "$DOCKER_CONFIG/config.json")"
+          [[ -n "$AUTH" && "$AUTH" != null ]] || { echo "::error::no registry credential"; exit 1; }
+          CHAL="$(curl -sS -m 30 -D - -o /dev/null --cacert "$SSL_CERT_DIR/ca.crt" "https://$HARBOR_HOST/v2/" | tr -d '\r' | sed -n 's/^[Ww]ww-[Aa]uthenticate: Bearer //p')"
+          REALM="$(sed -n 's/.*realm="\([^"]*\)".*/\1/p' <<<"$CHAL")"; SVC="$(sed -n 's/.*service="\([^"]*\)".*/\1/p' <<<"$CHAL")"
+          [[ -n "$REALM" ]] || { echo "::error::the registry offered no token endpoint"; exit 1; }
+          BT="$(printf 'header = "Authorization: Basic %s"\n' "$AUTH" | curl -fsS -m 30 -K - --cacert "$SSL_CERT_DIR/ca.crt" -G --data-urlencode "service=$SVC" --data-urlencode "scope=repository:$NAME:push,pull" "$REALM" | jq -r '.token // .access_token')"
+          [[ -n "$BT" && "$BT" != null ]] || { echo "::error::no registry token"; exit 1; }
+          echo "::add-mask::$BT"
+          reg() { printf 'header = "Authorization: Bearer %s"\n' "$BT" | curl -fsS -m 60 -K - --cacert "$SSL_CERT_DIR/ca.crt" "$@"; }
+          blob() { # $1 file -> uploads it, prints sha256:<hex>
+            local d loc; d="sha256:$(sha256sum "$1" | cut -d' ' -f1)"
+            loc="$(printf 'header = "Authorization: Bearer %s"\n' "$BT" | curl -fsS -m 60 -K - --cacert "$SSL_CERT_DIR/ca.crt" -D - -o /dev/null -X POST "https://$HARBOR_HOST/v2/$NAME/blobs/uploads/" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+            [[ "$loc" == http* ]] || loc="https://$HARBOR_HOST$loc"
+            case "$loc" in *\?*) loc="$loc&digest=$d" ;; *) loc="$loc?digest=$d" ;; esac
+            reg -X PUT -H 'Content-Type: application/octet-stream' --data-binary "@$1" "$loc" >/dev/null; echo "$d"
+          }
+          printf '{}' > "$RUNNER_TEMP/out/empty.json"
+          CFG="$(blob "$RUNNER_TEMP/out/empty.json")"; LAY="$(blob "$RUNNER_TEMP/out/sbom.json")"
+          jq -cn --arg c "$CFG" --arg l "$LAY" --argjson ls "$(stat -c %s "$RUNNER_TEMP/out/sbom.json")" \
+            '{schemaVersion:2,mediaType:"application/vnd.oci.image.manifest.v1+json",config:{mediaType:"application/vnd.oci.image.config.v1+json",digest:$c,size:2},layers:[{mediaType:"application/vnd.cyclonedx+json",digest:$l,size:$ls}]}' > "$RUNNER_TEMP/out/sbom-manifest.json"
+          reg -X PUT -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' --data-binary "@$RUNNER_TEMP/out/sbom-manifest.json" "https://$HARBOR_HOST/v2/$NAME/manifests/sha256-${DIGEST#sha256:}.sbom" >/dev/null
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          { echo "### build"; echo "- head SHA: \`$HEAD_SHA\`"; echo "- image: \`$NAME@$DIGEST\` (tag \`pr-$HEAD_SHA\`)"; echo "- SBOM: tag \`sha256-${DIGEST#sha256:}.sbom\`"; echo "- builder robot: \`$ROBOT_NAME\`"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: remove the credential files
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/dc" "$RUNNER_TEMP/out" "$RUNNER_TEMP/modcache"
+
+  sign:
+    name: sign
+    needs: [mint, build]
+    # runs even when the build failed, so the run's robot is always deleted; nothing is signed unless the build succeeded
+    if: ${{ always() && needs.mint.result == 'success' }}
+    runs-on: arc-signer
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # the trusted identity is fixed here (this file is on main, protected by CODEOWNERS), not taken from the run
+      CS_REPOSITORY: senthilorg1/autonomix-sandbox
+      CS_REPOSITORY_ID: "1462196310"
+      CS_OWNER_ID: "358000095"
+      CS_TRUSTED_WORKFLOW: senthilorg1/autonomix-sandbox/.github/workflows/trusted-candidate-build-reusable.yml@refs/heads/main
+      CS_HARBOR_URL: https://192.168.86.38:8444
+      CS_COSIGN_KEY: hashivault://cosign-pr
+      CS_COSIGN_BINARY: /usr/local/bin/cosign
+      CS_CLOSURE_TOOL: /usr/local/bin/closure-hash-tool
+      CS_OIDC_AUDIENCE: autonomix-ci-signer
+      CS_SERVICE: ${{ inputs.service }}
+      CS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      CS_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      CS_RUN_ID: ${{ github.run_id }}
+      CS_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CS_RUN_STARTED_AT: ${{ needs.mint.outputs.started_at }}
+    steps:
+      - name: stop here if the build did not succeed
+        if: ${{ needs.build.result != 'success' }}
+        run: |
+          echo "build result is ${{ needs.build.result }}, nothing will be signed"
+      # the tree is read as passive bytes: nothing from it is executed in this job
+      - if: ${{ needs.build.result == 'success' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: verify the candidate and sign it
+        if: ${{ needs.build.result == 'success' }}
+        run: |
+          set -euo pipefail
+          git update-ref refs/heads/main refs/remotes/origin/main
+          export CS_REPO_DIR="$GITHUB_WORKSPACE"
+          JWT="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=openbao-ci" | jq -r .value)"
+          [[ "$JWT" == *.*.* ]] || { echo "::error::no OIDC token"; exit 1; }
+          echo "::add-mask::$JWT"
+          VT="$(jq -cn --arg j "$JWT" '{role:"ci-candidate-signer",jwt:$j}' | curl -fsS -m 30 --cacert "$VAULT_CACERT" -X POST -d @- "$VAULT_ADDR/v1/auth/github-actions/login" | jq -r '.auth.client_token // empty')" \
+            || { echo "::error::OpenBao refused the login"; exit 1; }
+          [[ -n "$VT" ]] || { echo "::error::OpenBao returned no token"; exit 1; }
+          echo "::add-mask::$VT"
+          VAULT_TOKEN="$VT" candidate-signer
+      - name: summary
+        if: ${{ needs.build.result == 'success' && success() }}
+        run: |
+          { echo "### sign"; echo "- signed \`candidates/${GITHUB_REPOSITORY#*/}:pr-$CS_HEAD_SHA\` with cosign-pr (image signature, SBOM attestation, provenance)"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: delete the run's robot
+        if: always()
+        run: |
+          set -euo pipefail
+          TOK="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autonomix-ci-broker" | jq -r .value)"
+          echo "::add-mask::$TOK"
+          printf 'header = "Authorization: Bearer %s"\n' "$TOK" | curl -fsS -m 30 -K - --cacert "$POD_CA" -X DELETE -o /dev/null "$BROKER_OIDC/v1/builds/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: fail the job when the build failed
+        if: ${{ needs.build.result != 'success' }}
+        run: exit 1
