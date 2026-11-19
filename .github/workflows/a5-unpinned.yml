@@ -1,0 +1,11 @@
+name: a5-unpinned
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: arc-untrusted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
