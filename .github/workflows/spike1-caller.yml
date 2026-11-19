@@ -1,0 +1,16 @@
+# S4.3.0 spike 1 caller stub (sandbox only). Two jobs: the same reusable workflow called by absolute ref of the trusted branch, and by relative path (the control).
+name: spike1-caller
+on:
+  pull_request:
+permissions: {}
+jobs:
+  absolute:
+    permissions:
+      contents: read
+      id-token: write
+    uses: senthilorg1/autonomix-sandbox/.github/workflows/spike1-reusable.yml@refs/heads/spike-trusted
+  relative:
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/spike1-reusable.yml

@@ -12,7 +12,7 @@ jobs:
     steps:
       - name: Print the marker and the claims
         env:
-          MARKER: TRUSTED-VERSION
+          MARKER: TAMPERED-IN-PR
           AUD: https://senthilorg1.example/spike
         run: |
           set -eu
