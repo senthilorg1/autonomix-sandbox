@@ -1,0 +1,21 @@
+# A-8(c) forgery: a job written by the PR runs on the signer pool and tries to log in to OpenBao with its own OIDC token.
+# Expected: OpenBao refuses (job_workflow_ref is this file at refs/pull/<n>/merge, not the trusted reusable workflow on main). The job is green only if the login is REFUSED.
+name: forgery-c
+on: pull_request
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  try-login:
+    runs-on: arc-signer
+    timeout-minutes: 5
+    steps:
+      - name: log in to OpenBao with this workflow's token
+        run: |
+          set -uo pipefail
+          JWT="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=openbao-ci" | jq -r .value)"
+          echo "::add-mask::$JWT"
+          CODE="$(jq -cn --arg j "$JWT" '{role:"ci-candidate-signer",jwt:$j}' | curl -sS -m 30 --cacert "$VAULT_CACERT" -o /tmp/login.json -w '%{http_code}' -X POST -d @- "$VAULT_ADDR/v1/auth/github-actions/login")"
+          echo "OpenBao answered HTTP $CODE"
+          if jq -e '.auth.client_token' /tmp/login.json >/dev/null 2>&1; then echo "::error::FORGERY SUCCEEDED: OpenBao issued a token"; exit 1; fi
+          echo "login refused as expected"
