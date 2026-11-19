@@ -1,0 +1,17 @@
+# Caller stub of the Stage 4b release promotion (contract 17 section 7). Runs on every push to main (a merge); the file name is not watched by anything.
+# It only calls the reusable workflow on main by absolute reference: the called jobs run the version on main (same rule as Stage 3, spike 1).
+name: release-promote
+on:
+  push:
+    branches: [main]
+permissions: {}
+concurrency:
+  group: release-promote-${{ github.sha }}   # one promotion per merge commit; a re-run of the same commit is idempotent (rule P-8), a second run at the same time is not wanted
+  cancel-in-progress: false
+jobs:
+  release:
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    uses: senthilorg1/autonomix-sandbox/.github/workflows/release-promote-reusable.yml@main

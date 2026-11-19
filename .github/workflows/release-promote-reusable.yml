@@ -1,0 +1,108 @@
+# Stage 4b release promotion (contract 17, S4.4.3 decision D-443-1). Runs from main only (called by absolute reference from the caller stub).
+# Two jobs on arc-signer: promote and cleanup. There is no mint job and no redeem code: the promote job asks the broker for its release robot with its own OIDC token and
+# the robot's secret stays in a file in RUNNER_TEMP, never in an output, an argument or a log (S4.3.6 A-10).
+name: release-promote-reusable
+on:
+  workflow_call:
+permissions: {}
+env:
+  BROKER_OIDC: https://candidate-broker-oidc.ci-broker.svc:8443
+  POD_CA: /etc/ci/ca/ca.crt
+jobs:
+  promote:
+    name: promote
+    runs-on: arc-signer
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    env:
+      # the trusted identity is fixed here (this file is on main, protected by CODEOWNERS), not taken from the run
+      PM_REPOSITORY: senthilorg1/autonomix-sandbox
+      PM_REPOSITORY_ID: "1462196310"
+      PM_OWNER_ID: "358000095"
+      PM_TRUSTED_WORKFLOW: senthilorg1/autonomix-sandbox/.github/workflows/release-promote-reusable.yml@refs/heads/main
+      PM_HARBOR_HOST: 192.168.86.38:8444
+      PM_HARBOR_URL: https://192.168.86.38:8444
+      PM_HARBOR_CA_FILE: /etc/ci/ca/ca.crt
+      PM_HARBOR_READ_CRED_FILE: /etc/ci/harbor/cred
+      PM_COSIGN_BINARY: /usr/local/bin/cosign
+      PM_CRANE_BINARY: /usr/local/bin/crane
+      PM_CLOSURE_TOOL: /usr/local/bin/closure-hash-tool
+      PM_RELEASE_KEY: hashivault://cosign-release
+      PM_RELEASE_PUB: /etc/autonomix/keys/cosign-release.pub
+      PM_PR_PUB: /etc/autonomix/keys/cosign-pr.pub
+      PM_APPROVAL_PUB: /etc/autonomix/keys/cosign-approval.pub
+      PM_OIDC_AUDIENCE: autonomix-ci-promoter
+      PM_MERGE_SHA: ${{ github.sha }}
+      PM_RUN_ID: ${{ github.run_id }}
+      PM_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: refuse anything but a push of main
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EVENT" == push && "$REF" == refs/heads/main ]] || { echo "::error::the release promotion runs for a push to main only"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no valid commit SHA"; exit 1; }
+          echo "PM_RUN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      # the tree is read as passive bytes: nothing from it is executed in this job
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: get this run's release robot and promote
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export PM_REPO_DIR="$GITHUB_WORKSPACE"
+          BT="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autonomix-ci-broker" | jq -r .value)"
+          [[ "$BT" == *.*.* ]] || { echo "::error::no OIDC token"; exit 1; }
+          echo "::add-mask::$BT"
+          R="$(printf 'header = "Authorization: Bearer %s"\n' "$BT" | curl -fsS -m 30 -K - --cacert "$POD_CA" -X POST -H 'Content-Type: application/json' \
+                 -d "$(jq -cn --arg r "$GITHUB_RUN_ID" --arg a "$GITHUB_RUN_ATTEMPT" '{run_id:$r,run_attempt:$a}')" "$BROKER_OIDC/v1/releases")" || { echo "::error::the broker refused the release robot"; exit 1; }
+          NAME="$(jq -r .name <<<"$R")"; SECRET="$(jq -r .secret <<<"$R")"
+          [[ -n "$NAME" && -n "$SECRET" && "$NAME" != null && "$SECRET" != null ]] || { echo "::error::the broker returned no robot"; exit 1; }
+          echo "::add-mask::$SECRET"
+          [[ "$NAME" == 'robot$release+run-'"${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]] || { echo "::error::the robot is not this run's robot"; exit 1; }
+          export PM_RELEASE_ROBOT_FILE="$RUNNER_TEMP/release-robot.cred"
+          { printf '%s\n' "$NAME"; printf '%s\n' "$SECRET"; } > "$PM_RELEASE_ROBOT_FILE"
+          unset R SECRET BT
+          # OpenBao login with the same kind of token, a different audience; the login token never goes into argv or the log
+          JWT="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=openbao-ci" | jq -r .value)"
+          [[ "$JWT" == *.*.* ]] || { echo "::error::no OIDC token"; exit 1; }
+          echo "::add-mask::$JWT"
+          VT="$(jq -cn --arg j "$JWT" '{role:"ci-release-promoter",jwt:$j}' | curl -fsS -m 30 --cacert "$VAULT_CACERT" -X POST -d @- "$VAULT_ADDR/v1/auth/github-actions/login" | jq -r '.auth.client_token // empty')" \
+            || { echo "::error::OpenBao refused the login"; exit 1; }
+          [[ -n "$VT" ]] || { echo "::error::OpenBao returned no token"; exit 1; }
+          echo "::add-mask::$VT"
+          VAULT_TOKEN="$VT" release-promoter
+      - name: summary
+        if: ${{ success() }}
+        run: |
+          { echo "### promote"; echo "- merge commit: \`$PM_MERGE_SHA\`"; echo "- released: \`release/${GITHUB_REPOSITORY#*/}:rel-$PM_MERGE_SHA\` (signature, SBOM, provenance and release attestation with cosign-release)"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: remove the credential file
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/release-robot.cred"
+
+  cleanup:
+    name: cleanup
+    needs: promote
+    if: ${{ always() }}      # the run's robot is deleted whatever happened
+    runs-on: arc-signer
+    timeout-minutes: 5
+    permissions:
+      id-token: write        # no repository code is checked out here
+    steps:
+      - name: delete the run's release robot
+        run: |
+          set -euo pipefail
+          TOK="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autonomix-ci-broker" | jq -r .value)"
+          echo "::add-mask::$TOK"
+          printf 'header = "Authorization: Bearer %s"\n' "$TOK" | curl -fsS -m 30 -K - --cacert "$POD_CA" -X DELETE -o /dev/null "$BROKER_OIDC/v1/releases/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
