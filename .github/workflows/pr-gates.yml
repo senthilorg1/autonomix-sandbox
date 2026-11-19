@@ -1,6 +1,7 @@
 # Stage 1 and 2 gates for pull requests (S4.2.5). Runs on the ARC scale set arc-untrusted (ci-gates image): contents read only, no OIDC token, no secret.
 # The driver script is read from the main ref, not from the pull request, so a pull request cannot weaken the gates that judge it; this workflow file and gates/**
 # are CODEOWNERS-protected (decision D-42-9: the Free plan has no "required workflows", so the required status check "gates" plus CODEOWNERS stand in).
+# adding the comment for new PR test
 name: pr-gates
 on:
   pull_request:
