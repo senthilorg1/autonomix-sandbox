@@ -200,11 +200,17 @@ jobs:
             || { echo "::error::OpenBao refused the login"; exit 1; }
           [[ -n "$VT" ]] || { echo "::error::OpenBao returned no token"; exit 1; }
           echo "::add-mask::$VT"
+          export CS_OUTCOME_FILE="$RUNNER_TEMP/sign-outcome"
+          rm -f -- "$CS_OUTCOME_FILE"
           VAULT_TOKEN="$VT" candidate-signer
       - name: summary
         if: ${{ needs.build.result == 'success' && success() }}
         run: |
-          { echo "### sign"; echo "- signed \`candidates/${GITHUB_REPOSITORY#*/}:pr-$CS_HEAD_SHA\` with cosign-pr (image signature, SBOM attestation, provenance)"; } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$RUNNER_TEMP/sign-outcome" ]] && [[ "$(cat "$RUNNER_TEMP/sign-outcome")" == no-change ]]; then
+            { echo "### sign"; echo "- no service closure changed: published the cosign-pr no-change statement for \`candidates/${GITHUB_REPOSITORY#*/}:pr-$CS_HEAD_SHA\`; no candidate was signed"; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            { echo "### sign"; echo "- signed \`candidates/${GITHUB_REPOSITORY#*/}:pr-$CS_HEAD_SHA\` with cosign-pr (image signature, SBOM attestation, provenance)"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: delete the run's robot
         if: always()
         run: |

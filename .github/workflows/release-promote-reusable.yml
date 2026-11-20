@@ -36,6 +36,7 @@ jobs:
       PM_APPROVAL_PUB: /etc/autonomix/keys/cosign-approval.pub
       PM_OIDC_AUDIENCE: autonomix-ci-promoter
       PM_MERGE_SHA: ${{ github.sha }}
+      PM_BEFORE_SHA: ${{ github.event.before }}
       PM_RUN_ID: ${{ github.run_id }}
       PM_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
@@ -62,6 +63,8 @@ jobs:
           set -euo pipefail
           umask 077
           export PM_REPO_DIR="$GITHUB_WORKSPACE"
+          export PM_OUTCOME_FILE="$RUNNER_TEMP/promote-outcome"
+          rm -f -- "$PM_OUTCOME_FILE"
           BT="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autonomix-ci-broker" | jq -r .value)"
           [[ "$BT" == *.*.* ]] || { echo "::error::no OIDC token"; exit 1; }
           echo "::add-mask::$BT"
@@ -86,10 +89,14 @@ jobs:
       - name: summary
         if: ${{ success() }}
         run: |
-          { echo "### promote"; echo "- merge commit: \`$PM_MERGE_SHA\`"; echo "- released: \`release/${GITHUB_REPOSITORY#*/}:rel-$PM_MERGE_SHA\` (signature, SBOM, provenance and release attestation with cosign-release)"; } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$RUNNER_TEMP/promote-outcome" ]] && [[ "$(cat "$RUNNER_TEMP/promote-outcome")" == nothing-to-promote ]]; then
+            { echo "### promote"; echo "- merge commit: \`$PM_MERGE_SHA\`"; echo "- nothing to promote: no service closure changed between \`$PM_BEFORE_SHA\` and \`$PM_MERGE_SHA\`, so there is no candidate and no release"; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            { echo "### promote"; echo "- merge commit: \`$PM_MERGE_SHA\`"; echo "- released: \`release/${GITHUB_REPOSITORY#*/}:rel-$PM_MERGE_SHA\` (signature, SBOM, provenance and release attestation with cosign-release)"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: remove the credential file
         if: always()
-        run: rm -f -- "$RUNNER_TEMP/release-robot.cred"
+        run: rm -f -- "$RUNNER_TEMP/release-robot.cred" "$RUNNER_TEMP/promote-outcome"
 
   cleanup:
     name: cleanup
