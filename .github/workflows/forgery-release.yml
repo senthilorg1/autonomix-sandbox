@@ -1,0 +1,33 @@
+# A4-5 forgery: a job written by the PR runs on the signer pool and tries both things only the trusted release workflow may do:
+# (1) ask the candidate-broker for a release robot, (2) log in to OpenBao with the role ci-release-promoter, each with its own OIDC token.
+# Expected: the broker answers 403 (job_workflow_ref is this file at refs/pull/<n>/merge, event pull_request, not the trusted reusable workflow on main with event push)
+# and OpenBao refuses. The job is green only if BOTH are refused; a robot or a token is a failure and is reported as FORGERY SUCCEEDED.
+name: forgery-release
+on: pull_request
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  try-release:
+    runs-on: arc-signer
+    timeout-minutes: 5
+    steps:
+      - name: ask the broker for a release robot with this workflow's token
+        run: |
+          set -uo pipefail
+          TOK="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=autonomix-ci-broker" | jq -r .value)"
+          echo "::add-mask::$TOK"
+          CODE="$(printf 'header = "Authorization: Bearer %s"\n' "$TOK" | curl -sS -m 30 -K - --cacert /etc/ci/ca/ca.crt -o /tmp/robot.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+                 -d "$(jq -cn --arg r "$GITHUB_RUN_ID" --arg a "$GITHUB_RUN_ATTEMPT" '{run_id:$r,run_attempt:$a}')" https://candidate-broker-oidc.ci-broker.svc:8443/v1/releases)"
+          echo "the broker answered HTTP $CODE"
+          if jq -e '.secret' /tmp/robot.json >/dev/null 2>&1; then echo "::error::FORGERY SUCCEEDED: the broker issued a release robot"; rm -f /tmp/robot.json; exit 1; fi
+          echo "broker refused as expected"
+      - name: log in to OpenBao with this workflow's token
+        run: |
+          set -uo pipefail
+          JWT="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=openbao-ci" | jq -r .value)"
+          echo "::add-mask::$JWT"
+          CODE="$(jq -cn --arg j "$JWT" '{role:"ci-release-promoter",jwt:$j}' | curl -sS -m 30 --cacert "$VAULT_CACERT" -o /tmp/login.json -w '%{http_code}' -X POST -d @- "$VAULT_ADDR/v1/auth/github-actions/login")"
+          echo "OpenBao answered HTTP $CODE"
+          if jq -e '.auth.client_token' /tmp/login.json >/dev/null 2>&1; then echo "::error::FORGERY SUCCEEDED: OpenBao issued a token"; exit 1; fi
+          echo "login refused as expected"
