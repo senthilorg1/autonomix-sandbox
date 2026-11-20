@@ -33,15 +33,15 @@ gate undeclared-modules undeclared
 # Stage 1
 gate secrets betterleaks git --config "$GATES_DIR/gitleaks.toml" --no-banner --log-opts="$MB..$HEAD" .
 RULES=(--config "$GATES_DIR/semgrep/rules"); for v in "$GATES_DIR"/semgrep/vendor/*/; do RULES+=(--config "$v"); done
-# Semgrep runs without --error (a tool failure is still a non-zero exit) and the findings are judged here, because exactly one form of an unpinned `uses:` is allowed:
-# this repository's own trusted reusable workflow at the short ref `main` (contract 16 section 8, spike 1: `refs/heads/main` is refused at parse time, a SHA is impossible
+# Semgrep runs without --error (a tool failure is still a non-zero exit) and the findings are judged here, because exactly two forms of an unpinned `uses:` are allowed:
+# this repository's own trusted reusable workflows (the Stage 3 candidate build, and since S4.4.3 the Stage 4b release promotion, contract 17) at the short ref `main` (contract 16 section 8, spike 1: `refs/heads/main` is refused at parse time, a SHA is impossible
 # for a workflow that must always be the one on main). Any other unpinned reference, including the same file name in another repository, still fails.
 semgrep_scan() {
   semgrep scan --metrics=off --disable-version-check --quiet --baseline-commit "$MB" "${RULES[@]}" --sarif --output "$REPORTS/semgrep.sarif" . || return 1
   $PY - "$REPORTS/semgrep.sarif" "${GITHUB_REPOSITORY:-}" <<'PYEOF'
 import json,re,sys
 sarif,repo=sys.argv[1],sys.argv[2]
-allowed=re.compile(r'^\s*-?\s*uses:\s*["\']?'+re.escape(repo)+r'/\.github/workflows/trusted-candidate-build-reusable\.yml@main["\']?\s*(#.*)?$') if repo else None
+allowed=re.compile(r'^\s*-?\s*uses:\s*["\']?'+re.escape(repo)+r'/\.github/workflows/(?:trusted-candidate-build-reusable|release-promote-reusable)\.yml@main["\']?\s*(#.*)?$') if repo else None
 left=0
 for run in json.load(open(sarif)).get("runs",[]):
     for r in run.get("results",[]):
@@ -52,7 +52,7 @@ for run in json.load(open(sarif)).get("runs",[]):
             except (OSError,IndexError,KeyError):
                 line=""
             if allowed.match(line):
-                print("exempt: %s:%s (the trusted reusable workflow of this repository at main)"%(loc["artifactLocation"]["uri"],loc["region"]["startLine"]))
+                print("exempt: %s:%s (a trusted reusable workflow of this repository at main)"%(loc["artifactLocation"]["uri"],loc["region"]["startLine"]))
                 continue
         left+=1
         print("%s:%s %s: %s"%(loc["artifactLocation"]["uri"],loc["region"].get("startLine"),r["ruleId"],r["message"]["text"]))
