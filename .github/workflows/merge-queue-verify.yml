@@ -4,6 +4,8 @@
 name: merge-queue-verify
 on:
   merge_group:
+  pull_request:        # only so the required check exists on the PR head (GitHub will not queue a PR that lacks it); the real check is the merge_group run
+    branches: [main]
 permissions: {}
 jobs:
   queue-verify:
