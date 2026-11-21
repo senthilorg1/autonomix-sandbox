@@ -1,0 +1,76 @@
+# Stage 4a merge queue check (contract 17 section 4, rules Q-1 to Q-7; S4.4.6). Runs from main only (called by absolute reference from the caller stub).
+# One job on arc-verifier: no OpenBao, no secret, no repository code executed. It holds the read-only Harbor credential and the workflow's read-only GITHUB_TOKEN; the job's own OIDC token
+# is requested only to read who is running (rule Q-1), never to log in anywhere. A failing job is a failing required check, which ejects the queue entry.
+name: merge-queue-verify-reusable
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  verify:
+    name: verify
+    runs-on: arc-verifier
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      id-token: write
+    env:
+      # the trusted identity is fixed here (this file is on main, protected by CODEOWNERS), not taken from the run
+      QV_REPOSITORY: senthilorg1/autonomix-sandbox
+      QV_REPOSITORY_ID: "1462196310"
+      QV_OWNER_ID: "358000095"
+      QV_TRUSTED_WORKFLOW: senthilorg1/autonomix-sandbox/.github/workflows/merge-queue-verify-reusable.yml@refs/heads/main
+      QV_APPROVAL_APP_SLUG: autonomix-approval-recorder
+      QV_APPROVAL_APP_ID: "5822486"
+      QV_HARBOR_HOST: 192.168.86.38:8444
+      QV_HARBOR_URL: https://192.168.86.38:8444
+      QV_COSIGN_BINARY: /usr/local/bin/cosign
+      QV_CLOSURE_TOOL: /usr/local/bin/closure-hash-tool
+      QV_PR_PUB: /etc/autonomix/keys/cosign-pr.pub
+      QV_APPROVAL_PUB: /etc/autonomix/keys/cosign-approval.pub
+      QV_OIDC_AUDIENCE: autonomix-queue-verify
+      QV_REF: ${{ github.ref }}
+      QV_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+      QV_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+      QV_RUN_ID: ${{ github.run_id }}
+      QV_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: refuse anything but a merge queue entry of main
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EVENT" == merge_group ]] || { echo "::error::the queue check runs for merge_group only"; exit 1; }
+          [[ "$REF" =~ ^refs/heads/gh-readonly-queue/main/pr-[0-9]+-[0-9a-f]{40}$ ]] || { echo "::error::not a merge queue ref of main"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ && "$SHA" == "$HEAD_SHA" ]] || { echo "::error::the checked-out commit is not the queue head"; exit 1; }
+      # the tree is read as passive bytes: nothing from it is executed in this job
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: verify the queue entry (Q-1 to Q-7)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export QV_REPO_DIR="$GITHUB_WORKSPACE"
+          export QV_OUTCOME_FILE="$RUNNER_TEMP/verify-outcome"
+          rm -f -- "$QV_OUTCOME_FILE"
+          queue-verifier
+      - name: summary
+        if: ${{ success() }}
+        run: |
+          if [[ -f "$RUNNER_TEMP/verify-outcome" ]] && [[ "$(cat "$RUNNER_TEMP/verify-outcome")" == no-service-change ]]; then
+            { echo "### queue-verify"; echo "- queue head: \`$QV_HEAD_SHA\`"; echo "- no service closure changed (platform-only pull request); the recorder's \`autonomix/closure-approval\` check says so"; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            { echo "### queue-verify"; echo "- queue head: \`$QV_HEAD_SHA\`"; echo "- Q-1 identity, Q-2 pull request, Q-3 service, Q-4 tree, Q-5 attestations, Q-6 approval check, Q-7 candidate: all hold"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: remove the outcome file
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/verify-outcome"

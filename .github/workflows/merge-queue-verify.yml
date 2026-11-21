@@ -1,0 +1,15 @@
+# Caller stub of the Stage 4a merge queue check (contract 17 section 4, S4.4.6). Runs for every merge queue entry. On `merge_group` the stub that runs is the one in the MERGED TREE
+# (spike 1): a pull request that edits this file would run its own copy, so this path is protected by CODEOWNERS (/.github/) and the stub only calls the reusable workflow ON MAIN by
+# absolute reference; the called job runs the version on main (same rule as Stage 3 and 4b). The required check in the ruleset is "queue-verify / verify" (caller job / called job).
+name: merge-queue-verify
+on:
+  merge_group:
+permissions: {}
+jobs:
+  queue-verify:
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      id-token: write
+    uses: senthilorg1/autonomix-sandbox/.github/workflows/merge-queue-verify-reusable.yml@main
