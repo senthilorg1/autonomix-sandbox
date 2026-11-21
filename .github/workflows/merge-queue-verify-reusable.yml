@@ -8,7 +8,8 @@ permissions: {}
 jobs:
   verify:
     name: verify
-    runs-on: arc-verifier
+    # a merge queue entry runs on the verifier pool (read-only Harbor credential); the placeholder run on a pull request head runs on the untrusted pool, which holds no credential
+    runs-on: ${{ github.event_name == 'merge_group' && 'arc-verifier' || 'arc-untrusted' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -36,7 +37,8 @@ jobs:
       QV_RUN_ID: ${{ github.run_id }}
       QV_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
-      - name: refuse anything but a merge queue entry of main
+      - name: refuse anything but a merge queue entry of main (a pull request head only gets the placeholder)
+        id: guard
         env:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
@@ -44,16 +46,25 @@ jobs:
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          [[ "$EVENT" == merge_group ]] || { echo "::error::the queue check runs for merge_group only"; exit 1; }
+          if [[ "$EVENT" == pull_request ]]; then
+            # placeholder: the required check "queue-verify / verify" must exist on the PR head so GitHub lets the PR into the queue. It proves nothing; the merge_group run does.
+            echo "queue=false" >> "$GITHUB_OUTPUT"
+            { echo "### queue-verify"; echo "- pull request: nothing is checked here; Q-1 to Q-7 run on the merge queue entry"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [[ "$EVENT" == merge_group ]] || { echo "::error::the queue check runs for merge_group (and the pull_request placeholder) only"; exit 1; }
           [[ "$REF" =~ ^refs/heads/gh-readonly-queue/main/pr-[0-9]+-[0-9a-f]{40}$ ]] || { echo "::error::not a merge queue ref of main"; exit 1; }
           [[ "$SHA" =~ ^[0-9a-f]{40}$ && "$SHA" == "$HEAD_SHA" ]] || { echo "::error::the checked-out commit is not the queue head"; exit 1; }
+          echo "queue=true" >> "$GITHUB_OUTPUT"
       # the tree is read as passive bytes: nothing from it is executed in this job
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: ${{ steps.guard.outputs.queue == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: verify the queue entry (Q-1 to Q-7)
+        if: ${{ steps.guard.outputs.queue == 'true' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -64,7 +75,7 @@ jobs:
           rm -f -- "$QV_OUTCOME_FILE"
           queue-verifier
       - name: summary
-        if: ${{ success() }}
+        if: ${{ success() && steps.guard.outputs.queue == 'true' }}
         run: |
           if [[ -f "$RUNNER_TEMP/verify-outcome" ]] && [[ "$(cat "$RUNNER_TEMP/verify-outcome")" == no-service-change ]]; then
             { echo "### queue-verify"; echo "- queue head: \`$QV_HEAD_SHA\`"; echo "- no service closure changed (platform-only pull request); the recorder's \`autonomix/closure-approval\` check says so"; } >> "$GITHUB_STEP_SUMMARY"
